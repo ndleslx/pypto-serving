@@ -111,20 +111,20 @@ Send a generation request after the server logs `Application startup complete`:
 
 ```bash
 # Health check
-curl --noproxy "*" http://127.0.0.1:8899/health
+curl --noproxy "*" http://127.0.0.1:19340/health
 
 # Completion
-curl --noproxy "*" http://127.0.0.1:8899/v1/completions \
+curl --noproxy "*" http://127.0.0.1:19340/v1/completions \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Huawei is", "max_tokens": 32, "temperature": 0.0}'
 
 # Streaming
-curl --noproxy "*" http://127.0.0.1:8899/v1/completions \
+curl --noproxy "*" http://127.0.0.1:19340/v1/completions \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Huawei is", "max_tokens": 32, "stream": true}'
 
 # Chat completion
-curl --noproxy "*" http://127.0.0.1:8899/v1/chat/completions \
+curl --noproxy "*" http://127.0.0.1:19340/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "What is 1+1?"}], "max_tokens": 32}'
 ```
@@ -132,7 +132,7 @@ curl --noproxy "*" http://127.0.0.1:8899/v1/chat/completions \
 Run the serving benchmark:
 
 ```bash
-python tests/bench_serving.py --port 8899 --stream -n 8 -c 4 --max-tokens 16
+python tests/bench_serving.py --port 19340 --stream -n 8 -c 4 --max-tokens 16
 ```
 
 ## Notes
