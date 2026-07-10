@@ -310,10 +310,10 @@ def test_deepseek_compile_builds_one_runtime_scalar_layer_callable(tmp_path, mon
     assert compiled_names == ["deepseek_v4_prefill", "deepseek_v4_decode"]
     # The packed l3_prefill_fwd emits final-normalized x_out and carries a trailing
     # num_tokens scalar. LM-head is computed on the host side.
-    assert len(compiled_args["deepseek_v4_prefill"]) == 84
+    assert len(compiled_args["deepseek_v4_prefill"]) == 85
     # The packed l3_decode_fwd emits final-normalized x_out and carries a trailing
     # num_tokens scalar. LM-head is computed on the host side.
-    assert len(compiled_args["deepseek_v4_decode"]) == 80
+    assert len(compiled_args["deepseek_v4_decode"]) == 86
     # Both packed kernels carry a trailing num_tokens scalar.
     assert isinstance(compiled_args["deepseek_v4_prefill"][-1], ctypes.c_int32)
     assert isinstance(compiled_args["deepseek_v4_decode"][-1], ctypes.c_int32)
@@ -330,6 +330,8 @@ def test_deepseek_compile_builds_one_runtime_scalar_layer_callable(tmp_path, mon
     assert prefill_args[prefill_order.index("kv_cache")].shape == (8, 43 * 1, 128, 1, 512)
     assert prefill_args[prefill_order.index("cmp_kv")].shape == (8, 43 * 256, 128, 1, 512)
     assert prefill_args[prefill_order.index("idx_kv_cache")].shape == (8, 21 * 512, 128, 1, 128)
+    assert prefill_args[prefill_order.index("idx_kv_cache")].dtype == torch.int8
+    assert prefill_args[prefill_order.index("idx_kv_scale")].shape == (8, 21 * 512, 128, 1, 1)
     assert prefill_args[prefill_order.index("hca_cmp_wkv")].shape == (8, 20 * 512, 4096)
     assert prefill_args[prefill_order.index("csa_cmp_wkv")].shape == (8, 21 * 1024, 4096)
     assert prefill_args[prefill_order.index("csa_inner_wkv")].shape == (8, 21 * 256, 4096)
@@ -369,6 +371,20 @@ def test_deepseek_compile_builds_one_runtime_scalar_layer_callable(tmp_path, mon
     # rows and the TP vocab shards from the packed checkpoint weights.
     assert compiled_args["deepseek_v4_decode"][decode_order.index("final_norm_w")].shape == (8, 4096)
     assert compiled_args["deepseek_v4_decode"][decode_order.index("x_out")].shape == (8, 8, 4096)
+    # Decode ori-KV is a 2-block sliding-window ring (KV_ORI_MAX_BLOCKS) with a
+    # vLLM-style 128-column absolute block table (KV_ORI_TABLE_MAX_BLOCKS).
+    decode_args = compiled_args["deepseek_v4_decode"]
+    assert decode_args[decode_order.index("kv_cache")].shape == (8, 43 * 8 * 2, 128, 1, 512)
+    assert decode_args[decode_order.index("block_table")].shape == (8, 8, 128)
+    assert decode_args[decode_order.index("idx_kv_cache")].dtype == torch.int8
+    assert decode_args[decode_order.index("idx_kv_scale")].shape == (8, 21 * 8 * 64, 128, 1, 1)
+    # SWA metadata: full window (incl. current) for the SWA layer, history window
+    # (excludes current chunk) for HCA/CSA, plus the paged write slot mapping.
+    assert decode_args[decode_order.index("swa_slot_mapping")].shape == (8, 8)
+    assert decode_args[decode_order.index("swa_indices")].shape == (8, 8, 128)
+    assert decode_args[decode_order.index("swa_lens")].shape == (8, 8)
+    assert decode_args[decode_order.index("window_swa_indices")].shape == (8, 8, 128)
+    assert decode_args[decode_order.index("window_swa_lens")].shape == (8, 8)
 
 
 def test_deepseek_layer_plan_tracks_attention_and_router_metadata():
@@ -828,13 +844,49 @@ def test_deepseek_prepare_decode_inputs_uses_scratch_slots_for_fixed_rows():
     # kv_seq_lens = seq_len: last written position is seq_len-1 and seq_len already
     # counts the prefill-generated last token, so the KV history is seq_len entries.
     assert prepared.kv_seq_lens[0, :4].tolist() == [128, 5, 128, 128]
-    assert prepared.block_table.shape == (8, 32, 1)
+    assert prepared.block_table.shape == (8, 32, 128)
     assert prepared.cmp_block_table.shape == (8, 32, 32)
     assert prepared.ori_slot_mapping[0, :6].tolist() == [126, 127, 131, 132, 382, 383]
     assert prepared.hca_cmp_slot_mapping[0, :6].tolist() == [-1, 0, -1, -1, -1, 8192]
     assert prepared.csa_cmp_slot_mapping[0, :6].tolist() == [-1, 31, 4096, -1, -1, 8223]
     assert prepared.csa_idx_slot_mapping[0, :6].tolist() == [-1, 31, 8192, -1, -1, 16415]
     assert prepared.csa_state_slot_mapping[0, :6].tolist() == [126, 127, 263, 264, 646, 647]
+
+
+def test_deepseek_prepare_decode_inputs_builds_sliding_window_metadata():
+    runner, model = _runner_for_prepared_inputs()
+
+    prepared = runner.prepare_decode_inputs(
+        model,
+        DecodeBatch(
+            request_ids=["req-a", "req-b"],
+            token_ids=torch.tensor([[5], [9]], dtype=torch.long),
+            hidden_states=torch.arange(8, dtype=torch.bfloat16).reshape(2, 4),
+            seq_lens=torch.tensor([128, 5], dtype=torch.int32),
+        ),
+    )
+
+    # decode_batch=32, decode_seq=2 -> tokens 0,1 are row0 (slot 0, positions
+    # 126,127); tokens 2,3 are row1 (slot 1, positions 3,4).
+    # Absolute 128-column block table wraps into the 2-block physical ring per slot.
+    assert prepared.block_table.shape == (8, 32, 128)
+    assert prepared.block_table[0, 0, :4].tolist() == [0, 1, 0, 1]
+    assert prepared.block_table[0, 1, :4].tolist() == [2, 3, 2, 3]
+    # SWA full window (incl. current). token 1 = slot 0 pos 127 -> physical rows
+    # 0..127 in the ring; token 3 = slot 1 pos 4 -> rows 256..260.
+    assert prepared.swa_lens[0, 0].item() == 127
+    assert prepared.swa_lens[0, 1].item() == 128
+    assert prepared.swa_lens[0, 3].item() == 5
+    assert prepared.swa_indices[0, 1, :4].tolist() == [0, 1, 2, 3]
+    assert prepared.swa_indices[0, 3, :5].tolist() == [256, 257, 258, 259, 260]
+    # Paged write slot for the current token.
+    assert prepared.swa_slot_mapping[0, 1].item() == 127
+    assert prepared.swa_slot_mapping[0, 3].item() == 260
+    # History window excludes the current decode chunk positions.
+    assert prepared.window_swa_lens[0, 0].item() == 126
+    assert prepared.window_swa_lens[0, 1].item() == 126
+    assert prepared.window_swa_lens[0, 3].item() == 3
+    assert prepared.window_swa_indices[0, 3, :3].tolist() == [256, 257, 258]
 
 
 def test_deepseek_prepare_decode_inputs_feeds_two_real_tokens():
@@ -1171,9 +1223,12 @@ def test_deepseek_prefill_snapshot_slices_physical_slot_pool():
                 [10.0, 11.0, 12.0, 13.0, 20.0, 21.0, 22.0, 23.0],
                 dtype=torch.bfloat16,
             ).reshape(1, 8, 1, 1, 1),
-            "idx_kv_cache": torch.tensor([30.0, 31.0, 32.0, 33.0, 34.0, 35.0], dtype=torch.bfloat16).reshape(
+            "idx_kv_cache": torch.tensor([30, 31, 32, 33, 34, 35], dtype=torch.int8).reshape(
                 1, 6, 1, 1, 1
             ),
+            "idx_kv_scale": torch.tensor(
+                [40.0, 41.0, 42.0, 43.0, 44.0, 45.0], dtype=torch.float32
+            ).reshape(1, 6, 1, 1, 1),
             "csa_cmp_kv_state": torch.ones((1, 1, 1, 1, 1), dtype=torch.float32),
             "csa_cmp_score_state": torch.ones((1, 1, 1, 1, 1), dtype=torch.float32) * 2,
             "csa_inner_kv_state": torch.ones((1, 1, 1, 1, 1), dtype=torch.float32) * 3,
@@ -1190,6 +1245,7 @@ def test_deepseek_prefill_snapshot_slices_physical_slot_pool():
     assert csa_snapshot["kv_cache"].flatten().tolist() == [100.0]
     assert csa_snapshot["cmp_kv"].flatten().tolist() == [12.0, 13.0]
     assert csa_snapshot["idx_kv_cache"].flatten().tolist() == [33.0, 34.0, 35.0]
+    assert csa_snapshot["idx_kv_scale"].flatten().tolist() == [43.0, 44.0, 45.0]
     assert hca_snapshot["kv_cache"].flatten().tolist() == [200.0]
     assert hca_snapshot["cmp_kv"].flatten().tolist() == [22.0, 23.0]
 
@@ -1201,6 +1257,7 @@ def test_deepseek_decode_work_cache_preserves_decode_state_after_initial_seed():
         decode_seq=1,
         decode_tokens=3,
         ori_max_blocks=1,
+        decode_ori_max_blocks=1,
         cmp_max_blocks=1,
         idx_max_blocks=1,
         hca_state_max_blocks=1,
@@ -1239,7 +1296,8 @@ def test_deepseek_decode_work_cache_preserves_decode_state_after_initial_seed():
     runner._decode_work_cache = DeepSeekV4LayerCache(
         kv_cache=torch.zeros((1, 43 * layout.decode_batch, 1, 1, 1), dtype=torch.bfloat16),
         cmp_kv=torch.zeros((1, 43 * layout.decode_batch, 1, 1, 1), dtype=torch.bfloat16),
-        idx_kv_cache=torch.zeros((1, 21 * layout.decode_batch, 1, 1, 1), dtype=torch.bfloat16),
+        idx_kv_cache=torch.zeros((1, 21 * layout.decode_batch, 1, 1, 1), dtype=torch.int8),
+        idx_kv_scale=torch.zeros((1, 21 * layout.decode_batch, 1, 1, 1), dtype=torch.float32),
         hca_compress_state=torch.zeros((1, 20 * layout.decode_batch, 1, 1, hca_dim), dtype=torch.float32),
         csa_compress_state=torch.zeros((1, 21 * layout.decode_batch, 1, 1, csa_dim), dtype=torch.float32),
         csa_inner_compress_state=torch.zeros((1, 21 * layout.decode_batch, 1, 1, csa_inner_dim), dtype=torch.float32),
@@ -1259,7 +1317,8 @@ def test_deepseek_decode_work_cache_preserves_decode_state_after_initial_seed():
         if ratio == 4:
             tensors.update(
                 {
-                    "idx_kv_cache": torch.full((1, 1, 1, 1, 1), value + 0.5, dtype=torch.bfloat16),
+                    "idx_kv_cache": torch.full((1, 1, 1, 1, 1), int(value) + 3, dtype=torch.int8),
+                    "idx_kv_scale": torch.full((1, 1, 1, 1, 1), value + 0.5, dtype=torch.float32),
                     "csa_cmp_kv_state": torch.full(
                         (1, 1, 1, 1, npu_runner.DEEPSEEK_V4_CSA_MAIN_OUT_DIM),
                         value,

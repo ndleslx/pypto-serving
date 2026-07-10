@@ -589,7 +589,11 @@ class DeepSeekV4PyptoExecutor(CorePyptoExecutor):
                 ),
                 "idx_kv_cache": torch.empty(
                     (ranks, csa * layout.prefill_idx_block_num, layout.block_size, 1, DEEPSEEK_V4_IDX_HEAD_DIM),
-                    dtype=torch.bfloat16,
+                    dtype=torch.int8,
+                ),
+                "idx_kv_scale": torch.empty(
+                    (ranks, csa * layout.prefill_idx_block_num, layout.block_size, 1, 1),
+                    dtype=torch.float32,
                 ),
                 # Shared single per-rank prefill metadata (the kernel passes each
                 # whole tensor to every layer).
@@ -681,7 +685,7 @@ class DeepSeekV4PyptoExecutor(CorePyptoExecutor):
                 "kv_cache": torch.empty(
                     (
                         ranks,
-                        fwd * batch * layout.ori_max_blocks,
+                        fwd * batch * layout.decode_ori_max_blocks,
                         layout.block_size,
                         1,
                         model.config.head_dim,
@@ -707,7 +711,17 @@ class DeepSeekV4PyptoExecutor(CorePyptoExecutor):
                         1,
                         DEEPSEEK_V4_IDX_HEAD_DIM,
                     ),
-                    dtype=torch.bfloat16,
+                    dtype=torch.int8,
+                ),
+                "idx_kv_scale": torch.empty(
+                    (
+                        ranks,
+                        csa * batch * layout.idx_max_blocks,
+                        layout.block_size,
+                        1,
+                        1,
+                    ),
+                    dtype=torch.float32,
                 ),
                 "csa_compress_state": torch.empty(
                     (
@@ -738,8 +752,13 @@ class DeepSeekV4PyptoExecutor(CorePyptoExecutor):
                     dtype=torch.float32,
                 ),
                 # Shared single-copy per-step inputs.
-                "block_table": torch.empty((ranks, batch, layout.ori_max_blocks), dtype=torch.int32),
+                "block_table": torch.empty((ranks, batch, layout.ori_table_max_blocks), dtype=torch.int32),
                 "ori_slot_mapping": torch.empty((ranks, tokens), dtype=torch.long),
+                "window_swa_indices": torch.empty((ranks, tokens, layout.sliding_window), dtype=torch.int32),
+                "window_swa_lens": torch.empty((ranks, tokens), dtype=torch.int32),
+                "swa_slot_mapping": torch.empty((ranks, tokens), dtype=torch.long),
+                "swa_indices": torch.empty((ranks, tokens, layout.sliding_window), dtype=torch.int32),
+                "swa_lens": torch.empty((ranks, tokens), dtype=torch.int32),
                 "hca_cmp_slot_mapping": torch.empty((ranks, tokens), dtype=torch.long),
                 "hca_state_slot_mapping": torch.empty((ranks, tokens), dtype=torch.long),
                 "csa_cmp_slot_mapping": torch.empty((ranks, tokens), dtype=torch.long),
