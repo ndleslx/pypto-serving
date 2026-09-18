@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyPTO Serving · Qwen3-14B 接入详解 — Host 侧优化专题</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:            #f9f9f7;
+    --surface-1:       #fcfcfb;
+    --surface-2:       #f3f2ef;
+    --text-primary:    #0b0b0b;
+    --text-secondary:  #52514e;
+    --text-muted:      #898781;
+    --grid-line:       #e1e0d9;
+    --baseline:        #c3c2b7;
+    --border:          rgba(11,11,11,0.10);
+    --accent:          #2a78d6;   /* categorical slot 1 (blue) */
+    --accent-soft:     rgba(42,120,214,0.08);
+    --stage-host:      #2a78d6;   /* 时序图: host 调度/准备 */
+    --stage-device:    #eb6834;   /* 时序图: device 执行 */
+    --stage-reclaim:   #1baf7a;   /* 时序图: host 回收 */
+    --stage-host-ink:  #ffffff;
+    --stage-device-ink:#ffffff;
+    --stage-reclaim-ink:#ffffff;
+    --good:            #0ca30c;
+    --critical:        #d03b3b;
+    --code-bg:         #f4f3f0;
+    --ok-chip:         rgba(12,163,12,0.12);
+    --warn-chip:       rgba(208,59,59,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page:            #0d0d0d;
+      --surface-1:       #1a1a19;
+      --surface-2:       #232322;
+      --text-primary:    #ffffff;
+      --text-secondary:  #c3c2b7;
+      --text-muted:      #898781;
+      --grid-line:       #2c2c2a;
+      --baseline:        #383835;
+      --border:          rgba(255,255,255,0.10);
+      --accent:          #3987e5;
+      --accent-soft:     rgba(57,135,229,0.14);
+      --stage-host:      #3987e5;
+      --stage-device:    #d95926;
+      --stage-reclaim:   #199e70;
+      --code-bg:         #202020;
+      --ok-chip:         rgba(12,163,12,0.18);
+      --warn-chip:       rgba(208,59,59,0.16);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 16px/1.75 system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .layout { display: flex; gap: 40px; max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+  main { flex: 1 1 auto; min-width: 0; max-width: 860px; padding: 40px 0 120px; }
+  nav.toc {
+    display: none; position: sticky; top: 0; align-self: flex-start;
+    width: 300px; flex: 0 0 300px; max-height: 100vh; overflow-y: auto;
+    padding: 40px 8px 40px 0; font-size: 13.5px; line-height: 1.5;
+  }
+  @media (min-width: 1100px) { nav.toc { display: block; } }
+  nav.toc h3 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted); margin: 18px 0 6px; font-weight: 600; }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; }
+  nav.toc li { margin: 2px 0; }
+  nav.toc a { color: var(--text-secondary); text-decoration: none; display: block; padding: 3px 10px; border-left: 2px solid transparent; border-radius: 0 6px 6px 0; }
+  nav.toc a:hover { color: var(--text-primary); background: var(--surface-2); }
+  nav.toc a.l2 { padding-left: 24px; font-size: 12.5px; color: var(--text-muted); }
+
+  header.hero { border-bottom: 1px solid var(--border); padding: 56px 0 28px; margin-bottom: 40px; }
+  .eyebrow { font-size: 13px; font-weight: 600; letter-spacing: .12em; color: var(--accent); text-transform: uppercase; margin-bottom: 10px; }
+  h1 { font-size: 34px; line-height: 1.25; margin: 0 0 14px; font-weight: 700; }
+  .subtitle { font-size: 17px; color: var(--text-secondary); max-width: 720px; margin: 0 0 18px; }
+  .meta-chips { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12.5px; color: var(--text-secondary); }
+  .meta-chips span { background: var(--surface-1); border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px; }
+
+  h2 { font-size: 25px; margin: 64px 0 6px; padding-top: 18px; border-top: 1px solid var(--grid-line); font-weight: 700; }
+  h2:first-of-type { border-top: none; padding-top: 0; }
+  h3 { font-size: 19px; margin: 40px 0 8px; font-weight: 650; }
+  h4 { font-size: 16px; margin: 28px 0 6px; font-weight: 650; color: var(--text-primary); }
+  p { margin: 10px 0; color: var(--text-primary); }
+  .lead { color: var(--text-secondary); font-size: 17px; }
+  ul, ol { padding-left: 26px; margin: 10px 0; }
+  li { margin: 4px 0; }
+  li::marker { color: var(--text-muted); }
+  strong { font-weight: 650; }
+  a { color: var(--accent); }
+
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size: 0.88em; }
+  code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; overflow-x: auto; line-height: 1.6; font-size: 13px; margin: 14px 0; }
+  pre code { background: none; border: none; padding: 0; white-space: pre; }
+  .ref { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--text-muted); }
+
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--surface-1); border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 16px 0; font-size: 14.5px; color: var(--text-secondary); }
+  .callout b { color: var(--text-primary); }
+  .callout.warn { border-left-color: var(--critical); }
+
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--grid-line); vertical-align: top; }
+  th { color: var(--text-secondary); font-weight: 600; font-size: 13px; border-bottom: 1.5px solid var(--baseline); }
+  td code { white-space: nowrap; }
+  tr:last-child td { border-bottom: 1px solid var(--baseline); }
+
+  .chip { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 1px 10px; line-height: 1.7; white-space: nowrap; }
+  .chip.ok { background: var(--ok-chip); color: var(--good); }
+  .chip.no { background: var(--warn-chip); color: var(--critical); }
+  .chip.neutral { background: var(--surface-2); color: var(--text-secondary); }
+
+  /* ---------- 图表通用 ---------- */
+  figure { margin: 26px 0; background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px 14px; }
+  figure .fig-title { font-size: 14.5px; font-weight: 650; margin: 0 0 4px; }
+  figure .fig-sub { font-size: 12.5px; color: var(--text-muted); margin: 0 0 14px; }
+  figcaption { font-size: 12.5px; color: var(--text-muted); margin-top: 12px; border-top: 1px solid var(--grid-line); padding-top: 8px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12.5px; color: var(--text-secondary); margin: 0 0 12px; }
+  .legend .key { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 14px; height: 10px; border-radius: 2.5px; display: inline-block; }
+
+  /* 时序甘特图 */
+  .gantt { position: relative; }
+  .gantt .lane { display: flex; align-items: center; height: 34px; margin: 7px 0; }
+  .gantt .lane-label { flex: 0 0 118px; font-size: 12px; color: var(--text-secondary); text-align: right; padding-right: 12px; line-height: 1.3; }
+  .gantt .track { position: relative; flex: 1; height: 100%; background: repeating-linear-gradient(90deg, transparent 0 calc(12.5% - 1px), var(--grid-line) calc(12.5% - 1px) 12.5%); border-left: 1.5px solid var(--baseline); border-right: 1.5px solid var(--baseline); }
+  .gantt .blk { position: absolute; top: 4px; bottom: 4px; border-radius: 4px; display: flex; align-items: center; justify-content: center; overflow: hidden; font-size: 10.5px; font-weight: 600; letter-spacing: .01em; }
+  .gantt .blk.host    { background: var(--stage-host);    color: var(--stage-host-ink); }
+  .gantt .blk.device  { background: var(--stage-device);  color: var(--stage-device-ink); }
+  .gantt .blk.reclaim { background: var(--stage-reclaim); color: var(--stage-reclaim-ink); }
+  .gantt .blk.idle    { background: var(--surface-2); border: 1px dashed var(--baseline); color: var(--text-muted); font-weight: 500; }
+  .gantt .blk.ghost   { background: transparent; border: 1.5px dashed var(--stage-host); color: var(--stage-host); font-weight: 600; }
+  .gantt .axis { display: flex; margin-left: 118px; justify-content: space-between; font-size: 11px; color: var(--text-muted); padding-top: 2px; font-variant-numeric: tabular-nums; }
+  .gantt-group { margin: 20px 0 6px; }
+  .gantt-group > .g-title { font-size: 13px; font-weight: 650; margin-bottom: 6px; color: var(--text-primary); }
+  .gantt-group > .g-note { font-size: 12px; color: var(--text-secondary); margin: 2px 0 0; }
+  .gap-note { position: relative; margin-left: 118px; height: 20px; }
+  .gap-note .brace { position: absolute; top: 0; height: 7px; border-top: 1.5px solid var(--critical); border-left: 1.5px solid var(--critical); border-right: 1.5px solid var(--critical); border-radius: 6px 6px 0 0; }
+  .gap-note .tag { position: absolute; top: 8px; transform: translateX(-50%); font-size: 11px; color: var(--critical); white-space: nowrap; }
+
+  /* 架构图 */
+  .arch { font-size: 13px; }
+  .arch .tier { border: 1px solid var(--border); border-radius: 10px; background: var(--surface-1); padding: 10px 14px; margin: 0; position: relative; }
+  .arch .tier > .t-head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; margin-bottom: 6px; }
+  .arch .tier > .t-head .t-name { font-weight: 700; font-size: 13.5px; }
+  .arch .tier > .t-head .t-file { font-size: 11px; color: var(--text-muted); }
+  .arch .tier ul { margin: 0; padding-left: 18px; color: var(--text-secondary); }
+  .arch .tier li { margin: 2px 0; }
+  .arch .arrow { display: flex; justify-content: center; align-items: center; height: 34px; color: var(--text-muted); font-size: 11px; gap: 8px; }
+  .arch .arrow::before { content: "↓"; font-size: 17px; color: var(--baseline); }
+  .arch .proc { border-left: 3px solid var(--accent); }
+  .arch .ipc-band { border: 1.5px dashed var(--stage-device); border-radius: 8px; color: var(--text-secondary); text-align: center; padding: 7px 10px; font-size: 12px; background: var(--surface-2); }
+
+  /* worker 三车道 */
+  .lanes3 { display: flex; flex-direction: column; gap: 10px; }
+  .lanes3 .lanebox { border: 1px solid var(--border); border-radius: 10px; background: var(--surface-1); padding: 10px 14px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .lanes3 .lanebox .lname { flex: 0 0 150px; font-weight: 700; font-size: 13px; }
+  .lanes3 .lanebox .lname small { display: block; font-weight: 500; color: var(--text-muted); font-size: 11px; }
+  .lanes3 .lanebox .ldesc { flex: 1; color: var(--text-secondary); font-size: 12.5px; min-width: 240px; }
+  .lanes3 .q { text-align: center; color: var(--text-muted); font-size: 12px; padding: 2px 0; }
+  .lanes3 .q .qname { font-family: ui-monospace, Menlo, monospace; color: var(--text-secondary); }
+  .slot-pair { display: flex; gap: 10px; justify-content: center; margin-top: 14px; flex-wrap: wrap; }
+  .slot-pair .slt { border: 1.5px solid var(--stage-host); color: var(--stage-host); border-radius: 8px; padding: 6px 18px; font-size: 12.5px; font-weight: 600; font-family: ui-monospace, Menlo, monospace; }
+  .slot-pair .slt.busy { background: var(--stage-host); color: var(--stage-host-ink); }
+
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; font-size: 13px; }
+  .flow .step { border: 1px solid var(--border); background: var(--surface-1); border-radius: 8px; padding: 6px 12px; color: var(--text-secondary); }
+  .flow .step b { color: var(--text-primary); display: block; font-size: 12.5px; }
+  .flow .arr { color: var(--baseline); font-size: 15px; }
+
+  footer.doc-foot { margin-top: 72px; border-top: 1px solid var(--grid-line); padding-top: 16px; font-size: 12.5px; color: var(--text-muted); }
+  @media print {
+    nav.toc { display: none; }
+    body { background: #fff; }
+    .layout { max-width: none; }
+    main { max-width: none; }
+    figure, pre { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="目录">
+  <h3>目录</h3>
+  <ol>
+    <li><a href="#s1">1 · 概述</a></li>
+    <li><a href="#s2">2 · 总体架构</a></li>
+    <li><a href="#s3">3 · Qwen3-14B 模型接入</a></li>
+    <li><a href="#s3-1">3.1 模型识别与执行器选择</a></li>
+    <li><a href="#s3-2">3.2 模型规格与 kernel 契约</a></li>
+    <li><a href="#s3-3">3.3 内核编译与磁盘缓存</a></li>
+    <li><a href="#s3-4">3.4 权重加载与分层 staging</a></li>
+    <li><a href="#s3-5">3.5 KV Cache 初始化</a></li>
+    <li><a href="#s3-6">3.6 Prefill 执行路径</a></li>
+    <li><a href="#s3-7">3.7 Decode 执行路径</a></li>
+    <li><a href="#s3-8">3.8 采样：设备端 greedy / Top-K</a></li>
+    <li><a href="#s4">4 · Host 侧优化（重点）</a></li>
+    <li><a href="#s4-1">4.1 优化总览</a></li>
+    <li><a href="#s4-2">4.2 异步调度：引擎级 depth-2 流水线</a></li>
+    <li><a href="#s4-2-3">4.2.3 乐观推进与占位 token</a></li>
+    <li><a href="#s4-2-4">4.2.4 结果对账与一致性</a></li>
+    <li><a href="#s4-2-6">4.2.6 时序对比</a></li>
+    <li><a href="#s4-3">4.3 Worker 三级流水线：异步 prepare / dispatch / reclaim</a></li>
+    <li><a href="#s4-3-2">4.3.2 三车道结构</a></li>
+    <li><a href="#s4-3-5">4.3.5 双缓冲槽乒乓</a></li>
+    <li><a href="#s4-3-7">4.3.7 接入条件与当前状态</a></li>
+    <li><a href="#s4-4">4.4 轻量化 IPC 协议</a></li>
+    <li><a href="#s4-5">4.5 常驻共享内存缓冲</a></li>
+    <li><a href="#s4-6">4.6 设备端 embedding 与采样</a></li>
+    <li><a href="#s4-7">4.7 其他 host 侧优化</a></li>
+    <li><a href="#s5">5 · 可靠性与生命周期</a></li>
+    <li><a href="#s6">6 · 使用指南</a></li>
+    <li><a href="#s7">7 · 配置与环境变量参考</a></li>
+    <li><a href="#s8">8 · 代码地图</a></li>
+  </ol>
+</nav>
+<main>
+
+<header class="hero">
+  <div class="eyebrow">PyPTO Serving · 技术文档</div>
+  <h1>Qwen3-14B 接入详解<br><span style="font-size:22px;font-weight:600;color:var(--text-secondary)">—— 以 Host 侧优化为主线（异步调度、异步 prepare / reclaim 等）</span></h1>
+  <p class="subtitle">PyPTO Serving 是面向昇腾 NPU 的本地推理栈：Qwen3-14B 与 DeepSeek V4 通过 PyPTO 融合内核在其上 serving。本文基于当前主干代码，完整拆解 Qwen3-14B 从 checkpoint 到 OpenAI 兼容 API 的接入路径，并重点分析 host 侧为隐藏主机开销所做的异步化设计。</p>
+  <div class="meta-chips">
+    <span>代码基线：main @ <code>9db7e20</code></span>
+    <span>模型：Qwen3-14B（bf16，≈14 B 参数）</span>
+    <span>平台：Ascend NPU（a2a3）· Simpler L3 worker</span>
+    <span>整理日期：2026-09-18</span>
+  </div>
+</header>
+
+<!-- ================================================================ -->
+<h2 id="s1">1 · 概述</h2>
+<p class="lead">一句话概括接入方式：<b>Qwen3-14B 在 pypto-serving 中不是"逐层拼算子"，而是编译为三个全层融合（all-layer fused）PyPTO 内核——prefill、decode、topk 采样——由 host 侧引擎做连续批处理调度，经 Simpler L3 worker 派发到 AICore 执行。</b></p>
+
+<p>整个栈分为两个进程、五个层次：</p>
+<ul>
+  <li><b>引擎进程</b>：HTTP 服务（OpenAI 兼容）、<b>异步调度引擎</b>（连续批处理 / 分块 prefill / 前缀缓存 / 抢占）、KV cache 元数据管理、增量 detokenize；</li>
+  <li><b>Worker 进程</b>（每副本一个，spawn 启动、独占设备组）：Qwen 执行器与 runner、常驻共享内存 I/O 缓冲、权重与 KV 的设备驻留，以及把内核派发做成 <b>prepare → dispatch → reclaim 三级流水线</b> 的能力；</li>
+  <li><b>Simpler L3 DistributedWorker</b>：fork 出的芯片 worker，承接编译产物并管理设备内存，是 host 与 AICore 之间的运行时边界。</li>
+</ul>
+
+<p>Host 侧优化的核心动机很直接：<b>NPU 上单步内核执行很快，而每步之间 host 要做的事很多</b>——调度器决策、构造批、写内核元数据缓冲、IPC 往返、采样回填、状态更新。如果这些串行排在内核执行前后，设备利用率与解码吞吐都会被主机拖垮。pypto-serving 的应对是把 host 工作全部"藏"到设备执行的时间窗里，本文第 4 章逐项展开。</p>
+
+<div class="callout">
+  <b>阅读约定</b>：文中 <span class="ref">path/file.py:行号</span> 均指当前主干代码位置，可直接检索定位。所有时序图/结构图为<b>示意图</b>，块宽度不代表实测耗时比例。
+</div>
+
+<!-- ================================================================ -->
+<h2 id="s2">2 · 总体架构</h2>
+
+<figure>
+  <p class="fig-title">图 1 · pypto-serving 服务栈（Qwen3-14B 单副本视角）</p>
+  <p class="fig-sub">两个进程、一条 msgpack IPC、一层 Simpler L3 运行时；DP &gt; 1 时 ReplicaEngineCore / WorkerProcess 按副本成对复制</p>
+  <div class="arch">
+    <div class="tier proc">
+      <div class="t-head"><span class="t-name">HTTP 层（引擎进程）</span><span class="t-file">serving/server/server.py</span></div>
+      <ul>
+        <li><code>POST /v1/completions</code> · <code>POST /v1/chat/completions</code>（OpenAI 兼容，SSE 流式）、<code>/v1/models</code>、<code>/health</code>、<code>/start_profile</code> / <code>/stop_profile</code></li>
+        <li>chat 模板渲染（支持 <code>enable_thinking</code> 等 kwargs）、usage 统计直接取引擎权威 token 计数</li>
+      </ul>
+    </div>
+    <div class="arrow">请求进入引擎</div>
+    <div class="tier proc">
+      <div class="t-head"><span class="t-name">AsyncLLMEngine — DP 副本路由</span><span class="t-file">serving/engine/async_engine.py:921</span></div>
+      <ul>
+        <li>按 <i>least-pending-tokens + 在途路由负载</i> 选择副本（async_engine.py:1130-1142）</li>
+        <li>离线 <code>generate_batch</code> 与在线 serving 走同一条引擎路径</li>
+      </ul>
+    </div>
+    <div class="arrow">路由到副本核心</div>
+    <div class="tier proc">
+      <div class="t-head"><span class="t-name">ReplicaEngineCore ×dp — 每副本一份全部可变状态</span><span class="t-file">async_engine.py:151</span></div>
+      <ul>
+        <li><b>engine loop（asyncio）</b>：depth-2 流水线调度（§4.2）</li>
+        <li><b>Scheduler</b>：连续批处理、chunked prefill、前缀缓存、抢占（sched/scheduler.py）</li>
+        <li><b>KvCacheManager</b>：块分配 / 释放 / 链式哈希前缀缓存（memory/kv_cache.py）</li>
+        <li>增量 detokenize、非流式 final-only 输出（§4.7）</li>
+      </ul>
+    </div>
+    <div class="ipc-band">⇕ multiprocessing.Queue + msgpack：<code>StepCommand</code> / <code>StepResult</code>（增量协议，稳态每步 ≈1 KB，§4.4）</div>
+    <div class="tier">
+      <div class="t-head"><span class="t-name">WorkerProcess（spawn 子进程，独占设备组）</span><span class="t-file">serving/server/serving_worker.py:99</span></div>
+      <ul>
+        <li>请求缓存（prompt/采样参数一次注册）+ <code>_last_tokens</code>（占位 token 回填，§4.2.3）</li>
+        <li><b>busy loop</b>：FIFO 串行 或 prepare→device→reclaim 三车道流水（§4.3）</li>
+        <li>Sampler：设备端采样结果回退到 host 采样的兜底路径</li>
+      </ul>
+    </div>
+    <div class="arrow">委托执行器</div>
+    <div class="tier">
+      <div class="t-head"><span class="t-name">Qwen314BPyptoExecutor → Qwen314BModelRunner</span><span class="t-file">model/qwen/npu_executor.py:121 · npu_runner.py:123</span></div>
+      <ul>
+        <li>KernelCompiler：JIT 编译 + 磁盘缓存（§3.3）</li>
+        <li>权重 staging：12 条规则 → 11 块全层 stacked slab（§3.4）</li>
+        <li>TaskArgs：内核位置参数契约 + 常驻共享内存 I/O 槽（§4.5）</li>
+        <li>KV 容量测算（vLLM 式）与 warmup（§3.5）</li>
+      </ul>
+    </div>
+    <div class="arrow">L3 派发（resolve → run / submit）</div>
+    <div class="tier">
+      <div class="t-head"><span class="t-name">Simpler DistributedWorker（L3，fork 后创建）</span><span class="t-file">model/common/runner/l3_dispatch.py · worker/worker.py</span></div>
+      <ul>
+        <li>芯片子 worker 持有设备内存：常驻权重、分页 KV 池、设备驻留采样 scratch</li>
+        <li>AICore 内核：<code>prefill_fwd</code>（全层融合 prefill）、<code>decode_fwd</code>（全层融合 PAGED decode + LM head）、<code>topk_select_fwd</code>（greedy / Top-K 选择器）</li>
+      </ul>
+    </div>
+  </div>
+  <figcaption>左 border 标出引擎进程内的三个组件；IPC 带以下全部位于 worker 进程。Qwen 单副本默认 <code>--tp 1</code>，多卡以 <code>--dp N</code> 复制整条副本链路。</figcaption>
+</figure>
+
+<p>两个对理解后文很关键的进程边界事实：</p>
+<ul>
+  <li><b>KV 页数由 worker 测算、engine 对齐</b>：worker 在权重上载完成后按剩余显存算出页数，经 <code>multiprocessing.Value</code> 回传，engine 用它初始化 <code>KvCacheManager</code> 的块表（async_engine.py:269-287）。调度器从此只看元数据，不碰设备。</li>
+  <li><b>共享内存必须先于 L3 worker fork 建立</b>：fork 出的芯片 worker 只继承 fork 时刻的 host 内存，因此所有常驻 host 张量（权重 slab、TaskArgs 槽）都要先 <code>share_memory_()</code> 再创建 worker（buffer_set.py:9-16；npu_runner.py:163-168 的注释同样强调该顺序）。这条顺序被写成了硬校验：<code>resolve_l3_arg</code> 拒绝任何非共享的 CPU 张量。</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="s3">3 · Qwen3-14B 模型接入</h2>
+
+<h3 id="s3-1">3.1 模型识别与执行器选择</h3>
+<p>CLI 读取模型目录的 <code>config.json</code> 做家族探测：<code>model_type == "deepseek_v4"</code>（或架构名匹配）走 DeepSeek，<b>其余一律落入 qwen 家族</b>（cli/main.py:494-505），映射到执行器类名 <code>"PyptoQwen14BExecutor"</code>（cli/main.py:508-512），经 <code>EngineConfig.executor_cls</code> 传给 worker；worker 进程内再解析为 <code>Qwen314BPyptoExecutor</code>（serving_worker.py:195-206）。</p>
+<p>checkpoint 侧由 <code>HuggingFaceDirectoryLoader</code> 接管（model_loader.py:236-308）：解析 <code>config.json</code> 的形状字段（hidden_size、注意力头数、head_dim、vocab、层数、rope_theta、rms_norm_eps 等），构建 tokenizer，读取 <code>model.safetensors.index.json</code> 得到 <code>weight_map</code>。<b>逐层权重此时只读元数据</b>——<code>weight_map</code> 存入 <code>RuntimeModel.extra</code>，供执行器 staging 时按名惰性读取（model_loader.py:295-298）；真正 eager 读入的只有三个全局张量：embedding、final norm、lm_head（缺省时 tied 回 embedding），因为请求期的 embedding 查表需要它们留在 host 侧（model_loader.py:261-287）。</p>
+
+<h3 id="s3-2">3.2 模型规格与 kernel 契约</h3>
+<p>Qwen3-14B 的内核是<b>按这一精确形状编译</b>的，executor 在编译期做硬校验（npu_executor.py:459-486），任何不匹配直接报错而不是静默出错：</p>
+<table>
+  <tr><th>项</th><th>值</th><th>校验点</th></tr>
+  <tr><td>hidden_size / intermediate_size</td><td>5120 / 17408</td><td><span class="ref">npu_executor.py:463-469</span></td></tr>
+  <tr><td>注意力头 / KV 头（GQA）</td><td>40 / 8，head_dim 128</td><td><span class="ref">npu_executor.py:463-469</span></td></tr>
+  <tr><td>层数</td><td>40 —— 必须等于内核常量 <code>NUM_LAYERS</code>（融合解码的层数是编译期循环，不接受覆盖）</td><td><span class="ref">npu_executor.py:220-227</span></td></tr>
+  <tr><td>vocab</td><td>151936，按 512 对齐 pad 到 <b>152064</b>（须为内核 <code>VOCAB_CHUNK=64</code> 的倍数）；<code>REAL_VOCAB</code> 必须等于原始 vocab</td><td><span class="ref">npu_executor.py:230-243</span></td></tr>
+  <tr><td>KV 页大小</td><td><b>128 token/页</b>（<code>--block-size</code> 必须为 128）</td><td><span class="ref">npu_executor.py:482-486</span></td></tr>
+  <tr><td>max_model_len</td><td>不得超过内核编译期 <code>MAX_SEQ</code>（默认 4096；<code>MAX_CTX_BLOCKS</code>、<code>NUM_PAGES</code>、rope 表大小均由它导出）</td><td><span class="ref">npu_executor.py:193-201</span></td></tr>
+  <tr><td>批大小</td><td>decode 内核为定批（padded 宽度 <code>BATCH_PAD</code>），运行时 <code>max_batch_size</code> 不得超过 padded 宽度</td><td><span class="ref">npu_executor.py:203-219</span></td></tr>
+</table>
+
+<p>三个内核（pypto-lib <code>models/qwen3_14b/</code>，经 <code>PYPTO_LIB_ROOT</code> 或仓库内 submodule 定位，npu_executor.py:72-118）：</p>
+<ul>
+  <li><b><code>prefill_fwd</code></b>：一次派发跑完 40 层 prefill + LM head，按 <code>block_table</code> / <code>slot_mapping</code> 把 KV 直接写进分页池；输出 <code>[batch, padded_vocab]</code> 的 float32 logits（host 共享槽）。</li>
+  <li><b><code>decode_fwd</code></b>：一次派发跑完 40 层 decode + LM head，<b>PAGED</b> 寻址与 prefill 共用同一设备驻留 KV 池，无需任何连续缓冲桥接；定批内核，运行时批从 <code>seq_lens</code> 描述符读出（npu_runner.py:618-633 的路径说明）。</li>
+  <li><b><code>topk_select_fwd</code></b>：共享的 greedy / Top-K 选择器，<code>sampling_control = [actual_batch, selection_k]</code> 控制实际批与选择宽度（greedy 时 <code>selection_k=1</code>，Top-K 时为 32），同一程序复用而不额外注册 worker 程序（npu_runner.py:749-768）。</li>
+</ul>
+
+<h3 id="s3-3">3.3 内核编译与磁盘缓存</h3>
+<p><code>KernelCompiler</code>（common/compiler/compiler.py）把 pypto-lib 的 host wrapper（<code>qwen3_prefill_host</code> / <code>qwen3_decode_host</code> / <code>qwen3_topk_select_host</code>）编译为 <code>DistributedCompiledProgram</code>。编译走<b>签名模式</b>：张量形状 / dtype 从 wrapper 的注解读取，不需要传样例张量（compiler.py:76-83）。产物包装成 <code>L3Callable</code>（compiled 程序 + <code>aicpu_thread_num</code> + 可选 <code>dispatch_args</code> 前缀，l3_callable.py:17-35）。</p>
+<p>打开 <code>--use-compile-cache</code> 后，每个内核直接落到 <code>&lt;build_dir&gt;/&lt;name&gt;</code>，下次启动凭 <code>distributed_meta.json</code> 命中即从磁盘重载，<b>跳过 JIT 与设备编译</b>；缓存按内核名分槽、不做指纹校验，调用方需保证目录与当前配置/内核源匹配（compiler.py:44-53, 103-140）。每个 worker 进程还有独立 build 目录 <code>PYPTO_PROG_BUILD_DIR/serving_dp&lt;rank&gt;_d&lt;devices&gt;</code>，避免多 worker 互踩（serving_worker.py:208-214）。</p>
+
+<h3 id="s3-4">3.4 权重加载与分层 staging</h3>
+<p>融合内核按"整模型 slab"消费权重：每类权重是一块把 40 层沿轴 0 背靠背堆叠的张量。staging 由通用流水线完成（common/weights/），Qwen 只提供一张规则表（model/qwen/weight_spec.py:56-89）：</p>
+<ul>
+  <li><b>投影矩阵</b>（q/k/v/o/gate/up/down）：<code>transpose=True</code> 转成 <code>[in, out]</code>，cast bf16 —— cast 直接搭在 <code>destination.copy_()</code> 里完成；</li>
+  <li><b>norm gamma</b>（input/post rms）：cast float32、<code>flatten_to_row</code> 成 <code>[1, N]</code> 行以便跨层堆叠；</li>
+  <li><b>QK norm 缺省</b>：<code>DefaultedWeightRule</code>，缺失时按 <code>[1, 128]</code> 填 <b>ones</b>（不是 zeros——零会把缩放后的激活直接消灭，这是支持无 QK norm 变体的正确姿势）；</li>
+  <li><b>全局权重</b>：embedding 以零 pad 到 152064（pad id 永不被查表），<b>lm_head 以复制第 0 行的方式 pad</b>（零行会让 pad 词元拿到同一个有限 logit，变成采样噪声；weight-staging.md 记录了这条设计约束）。</li>
+</ul>
+<table>
+  <tr><th>stacked slab（40 层，轴 0）</th><th>形状</th><th>dtype</th></tr>
+  <tr><td><code>decode_wq</code> / <code>decode_wo</code></td><td>[204800, 5120]</td><td>bf16</td></tr>
+  <tr><td><code>decode_wk</code> / <code>decode_wv</code></td><td>[204800, 1024]</td><td>bf16</td></tr>
+  <tr><td><code>decode_w_gate</code> / <code>decode_w_up</code></td><td>[204800, 17408]</td><td>bf16</td></tr>
+  <tr><td><code>decode_w_down</code></td><td>[696320, 5120]</td><td>bf16</td></tr>
+  <tr><td><code>decode_input/post_rms_weight</code></td><td>[40, 5120]</td><td>fp32</td></tr>
+  <tr><td><code>decode_q/k_norm_weight</code></td><td>[40, 128]</td><td>fp32</td></tr>
+</table>
+<p>性能与内存上的三个要点：</p>
+<ul>
+  <li><b>峰值 host 内存 ≈ 1×</b>：逐层读取——每层原始张量读出、写进自己的 slab 切片、随即释放，全程不 <code>torch.cat</code>（slab 一次性分配，后续层拿到的是自己切片的 view）。对比旧的"整包读入"路径（state dict + cast 副本 + 目的地同时存活），内存减半以上。</li>
+  <li><b>staging 线程池</b>：14B 的逐层拷贝串行约 90 s，是启动主导项；各层写不相交的 slab 切片且 <code>copy_</code> 释放 GIL，因此用线程池真并行。线程数默认 <code>min(层数, CPU 数, 32)</code>（内存带宽瓶颈，16-32 线程后不再增益），可用 <code>PYPTO_STAGING_THREADS</code> 覆盖；池外全局 <code>torch.set_num_threads(1)</code> 一次性钉住（per-worker 保存/恢复会竞态），否则 N 个 staging 线程各自展开 torch 线程池反而更慢（npu_executor.py:344-413；pipeline.py:66-91）。</li>
+  <li><b>slab 必须在共享内存</b>：上传发生在 fork 出的子 worker 里，私有页对它是不可见的——这是正确性问题而非性能问题，所以分配器固定 <code>torch.empty(...).share_memory_()</code>（npu_executor.py:411）。</li>
+</ul>
+
+<h3 id="s3-5">3.5 KV Cache 初始化：vLLM 式显存测算</h3>
+<p><code>init_kv_cache</code>（npu_runner.py:204-262）的顺序本身就是一次优化——<b>先让所有竞争显存的常驻物就位，再用剩余空间测 KV</b>：</p>
+<ol>
+  <li>创建 L3 worker（此时 slab / TaskArgs 已在共享内存里）；</li>
+  <li>上传静态张量（权重、rope 表、final norm），并<b>提前</b>保留设备驻留的 decode 采样 scratch（~10 MB），保证它计入后续测算的峰值而不是首次 greedy 步才冒出来吃掉安全余量（npu_runner.py:228-236）；</li>
+  <li><b>warmup 派发</b>：按服务满配（<code>max_batch_size</code> × <code>max_num_batched_tokens</code>）跑一遍真规格的 prefill + decode，用 <code>slot_mapping=-1</code> 让全部读写落到 1 页 scratch 上——simpler 的 ring-heap arena 由此分配，且超配的 <code>max_num_batched_tokens</code>（会顶到融合 prefill 的单芯 attention 堆上限）在启动期就暴露，而不是等第一个请求（npu_runner.py:442-515）；</li>
+  <li><b>测算页数</b>：<code>pages = (total × utilization − max(peak_non_kv, simpler_committed)) / bytes_per_page</code>，其中 <code>peak_non_kv = total − free</code> 由驱动口径读出，<code>simpler_committed</code> 是 simpler 内存分配器的权威总量，两者取 max 以防任一口径低估（npu_runner.py:322-361）；</li>
+  <li><b>失败减半重试</b>：分配 OOM 则页数减半重试，下限 <code>max_batch_size</code> 页（npu_runner.py:264-297）；</li>
+  <li>页数回传 engine 初始化块表，并打印逐项内存构成（权重估算 / KV 精确 / arena / 残差，npu_runner.py:363-436）。</li>
+</ol>
+<p>按 bf16、页 128 token 计，每页 KV = 40 层 × 2(K/V) × 8 头 × 128 位置 × 128 维 × 2 B ≈ <b>20 MiB</b>。以 64 GB HBM、0.90 利用率、权重约 28 GB 为例做示意估算：KV 预算 ≈ 57.6 − 28 − arena ≈ 28 GB，约 1400 页 ≈ 18 万 token 的上下文容量。</p>
+
+<h3 id="s3-6">3.6 Prefill 执行路径</h3>
+<p>调度器把若干请求的 prefill chunk（可能来自不同请求、不同 chunk 起点）合成一个 <code>PrefillBatch</code>：所有 chunk 的 token 拼成一个设备张量，<code>chunk_offsets</code> 记录各 chunk 在拼接张量里的位置，<code>chunk_starts</code> 记录各 chunk 在<b>各自序列里的绝对位置</b>（RoPE 用，serving/utils/prefill.py:35-64）。runner 把它们写进常驻缓冲（§4.5），逐请求写 <code>block_table</code> 行与 <code>slot_mapping</code>（物理槽 = <code>page_id × page_size + 页内偏移</code>，跨页用 <code>np.arange</code> 连续段直写 numpy 视图，npu_runner.py:1082-1114），然后一次 <code>_run_l3</code> 派发 <code>prefill_fwd</code>。</p>
+<p>采样只发生在<b>完成 prompt 的末 chunk</b> 上：greedy（temperature ≤ 0）直接用设备端 <code>topk_select</code>(k=1) 的结果；否则走 Top-K 候选或 host 采样（serving_worker.py:699-737）。</p>
+
+<h3 id="s3-7">3.7 Decode 执行路径</h3>
+<p><code>decode_fwd</code> 是<b>定批</b>内核：无论实际几个请求都计算全部 <code>max_batch_size</code> 行。补齐方式很讲究——<b>把活跃行 0 的输入复制进 padding 行</b>：这些行重算行 0 的 K/V 并写回行 0 自己的槽，是幂等写，绝不会污染别的请求的物理页；它们的 logits 随后裁掉（npu_runner.py:626-633, 1046-1054）。相比"padding 行指向独立 dummy 页"，这省掉了额外页占用与清理。</p>
+<p>每步真正要写的 host 侧元数据只有三样：<code>token_ids</code> 首列、<code>seq_lens</code>、每行的 <code>slot_mapping</code>；<code>block_table</code> 行带缓存——某行的页分配没变就不重写（npu_runner.py:1061-1080），长连接 decode 稳态下基本零写入。</p>
+
+<h3 id="s3-8">3.8 采样：设备端 greedy / Top-K</h3>
+<p>采样被尽量推到设备上，避免每步把全词表 logits 搬回 host：</p>
+<ul>
+  <li><b>greedy</b>（temperature ≤ 0）：<code>decode_fwd</code> 直接产出 <code>sampled_ids</code>，host 只回读 <code>[batch, 1]</code> 个 int；全词表 logits 写入<b>设备驻留 scratch</b>，根本不落 host（npu_runner.py:812-834）。</li>
+  <li><b>Top-K 采样</b>（temperature &gt; 0 且 1 ≤ top_k ≤ 32）：设备端 <code>topk_select_fwd</code> 产出 top-32 的 (value, index) 候选，host 在 32 个候选上做温度采样（sampler 按 <code>SamplingParams</code>），传输量从 152064 × 4 B/行 降到 32 × 8 B/行。</li>
+  <li><b>host 兜底</b>：不满足上述条件（如 top_k &gt; 32 或需要完整 softmax）时回退 host 采样，此时才回传裁剪后的 logits。</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="s4">4 · Host 侧优化（重点）</h2>
+
+<h3 id="s4-1">4.1 优化总览</h3>
+<table>
+  <tr><th>#</th><th>优化</th><th>层次</th><th>解决的问题</th><th>Qwen3-14B</th></tr>
+  <tr><td>1</td><td><b>异步调度（引擎级 depth-2 流水线）</b></td><td>引擎 ↔ worker</td><td>调度 / IPC / 状态更新串行阻塞设备</td><td><span class="chip ok">默认开启</span></td></tr>
+  <tr><td>2</td><td><b>异步 prepare / dispatch / reclaim（worker 三车道）</b></td><td>worker 内部</td><td>输入准备与输出回收占住设备车道</td><td><span class="chip neutral">框架就绪，runner 待接入</span>（§4.3.7）</td></tr>
+  <tr><td>3</td><td>轻量化 IPC（msgpack 增量协议）</td><td>引擎 ↔ worker</td><td>每步全量 pickle 整图 ≈160 KB</td><td><span class="chip ok">生效</span></td></tr>
+  <tr><td>4</td><td>常驻共享内存缓冲（TaskArgs 槽）</td><td>runner</td><td>每步重分配 / 重上传内核 I/O</td><td><span class="chip ok">生效</span></td></tr>
+  <tr><td>5</td><td>静态权重一次上传 + 缓存解析</td><td>L3 dispatch</td><td>权重反复 resolve / 上传</td><td><span class="chip ok">生效</span></td></tr>
+  <tr><td>6</td><td>设备端 embedding + 采样 + scratch 驻留</td><td>内核 / runner</td><td>全词表 logits D2H、host 查表</td><td><span class="chip ok">生效</span></td></tr>
+  <tr><td>7</td><td>增量 detokenize + 非流式 final-only</td><td>引擎</td><td>每步全量 decode O(N²)、每 token 唤醒协程</td><td><span class="chip ok">生效</span></td></tr>
+  <tr><td>8</td><td><code>gc.freeze()</code> 常驻集冻结（双进程）</td><td>引擎 + worker</td><td>gen2 GC 重扫常驻对象、毫秒级停顿插入解码步</td><td><span class="chip ok">生效</span></td></tr>
+  <tr><td>9</td><td>权重 staging 线程池 + 磁盘内核缓存</td><td>启动</td><td>启动分钟级（staging ~90 s + JIT 编译）</td><td><span class="chip ok">生效</span></td></tr>
+  <tr><td>10</td><td>DP least-pending-tokens 路由 + 在途负载</td><td>引擎</td><td>副本负载倾斜</td><td><span class="chip ok">生效</span></td></tr>
+</table>
+<p class="lead">下面按重要性展开 1、2 两项——异步化设计，然后是支撑它们落地的 3–6。</p>
+
+<!-- ---------------- 4.2 ---------------- -->
+<h3 id="s4-2">4.2 异步调度：引擎级 depth-2 流水线</h3>
+
+<h4>4.2.1 动机</h4>
+<p>同步模式下（<code>async_scheduling=False</code>，或旧版行为）每个调度步是严格的一问一答：</p>
+<pre><code>engine: schedule() → 编码 StepCommand → IPC → 阻塞等结果 → update_from_output() → 下一步
+worker:              解码 → 准备输入 → 派发内核 → 等内核完成 → 回收 → 编码 StepResult → IPC</code></pre>
+<p>设备执行内核期间，引擎进程闲着；引擎调度与更新期间，设备闲着。解码步内核本身只有几十毫秒量级，而调度器决策 + 批构造 + IPC 往返 + 状态更新合计可达毫秒到十毫秒级——<b>这些主机时间每步都全额出现在关键路径上</b>。</p>
+
+<h4>4.2.2 引擎循环：派发不等待，等待只发生在队列满时</h4>
+<p>开启异步调度后（<code>EngineConfig.resolve_async_scheduling()</code> 默认返回 <b>True</b>，对所有执行器生效，async_engine.py:93-99；当前无 CLI 开关），引擎维护一个深度为 2 的在飞行列 <code>_batch_queue</code>（async_engine.py:218-224）：</p>
+<pre><code>while running:
+    if len(batch_queue) &lt; 2 and scheduler.has_work():
+        dispatched = try_dispatch_step()        # schedule() + IPC，非阻塞
+    if batch_queue:
+        if len(batch_queue) &gt;= 2 or not dispatched:
+            await await_and_apply_oldest()       # 只在队列满/无事可派时阻塞取最老结果
+    elif not dispatched:
+        flush_pending_frees(); sleep(1 ms)</code></pre>
+<p>要点（async_engine.py:460-538）：</p>
+<ul>
+  <li><b>派发完全非阻塞</b>：<code>StepCommand</code> 编码后直接 <code>input_queue.put()</code>。step N 在设备上执行时，引擎已经在构造并投递 step N+1——worker 一做完 N 就能立刻取到 N+1，设备不再为引擎调度空转。</li>
+  <li><b>FIFO 对齐</b>：worker 每条命令恰好回一条结果且按序，因此"最老在飞步骤"就是下一个到达的结果；引擎按 <code>step_id</code> 核对，错位即致命失步（async_engine.py:558-568）。</li>
+  <li><b>深度选 2 而不是更深</b>：一步的输入依赖上一步的采样 token（见下），更深需要更复杂的 token 链推导，收益却递减；深度 2 已足够把引擎侧 host 工作全部藏进设备执行窗。</li>
+</ul>
+
+<h4 id="s4-2-3">4.2.3 乐观状态推进与占位 token：跨步一致性的两根支柱</h4>
+<p>depth-2 的难点在于：<b>调度 step N+1 时，step N 的采样 token 还没回来</b>，但调度器看到的状态必须"像已经拿到 token 一样"自洽，否则同一个槽位会被重复调度。解决方案是一对配套机制：</p>
+
+<p><b>① 乐观推进（advance_after_schedule，scheduler.py:554-611）。</b>派发后立刻按"这步会成功"推进状态：</p>
+<ul>
+  <li><code>num_computed_tokens += num_new_tokens</code>（本步覆盖的 token 视为已算，镜像同步路径 <code>update_from_output</code> 的行为）；</li>
+  <li>会采样的步骤（decode 或完成 prompt 的末 prefill chunk）为输出预留 <code>num_output_placeholders</code>：<b>投机/MTP 解码按上界预留 <code>1 + num_speculative_tokens</code></b>，因为实际接收数只有 worker 回复后才知道；占位计入 <code>num_tokens</code>（scheduler.py:105-114），使 <code>num_new_tokens_needed</code> / <code>is_prefill</code> 在下一步 schedule 时保持正确；</li>
+  <li><b>前缀缓存发布被显式推迟到结果确认后</b>：派发时 KV 尚未真正写入，此时发布块哈希，一旦该步失败/超时，后续同 prompt 请求会命中"未算却已发布"的块——发布统一挪到对账阶段（scheduler.py:589-593）；</li>
+  <li><b>terminal prefill 栅栏</b>：完成 prompt 的 prefill 步在 worker 确认并初始化好请求级 decode 状态前，该请求不再被派发为 decode（<code>terminal_prefill_in_flight</code>，scheduler.py:99-103）——栅栏是每请求粒度，无关请求继续走 depth-2 流水。</li>
+</ul>
+
+<p><b>② 占位 token（PLACEHOLDER_TOKEN = -1，ipc.py:35）。</b>step N+1 的 decode 输入 token 在命令构造时未知（async_engine.py:663-673）：</p>
+<div class="flow">
+  <span class="step"><b>engine 构造 step N+1</b>last_token 尚未知 → 发送 -1</span><span class="arr">→</span>
+  <span class="step"><b>worker FIFO 保证</b>运行 N+1 时 N 的结果必已采样并缓存</span><span class="arr">→</span>
+  <span class="step"><b>_resolve_decode_token</b><span class="ref">serving_worker.py:739-753</span>从 _last_tokens[req] 取最近一枚回填</span>
+</div>
+<p><code>seq_len</code> 同样在 schedule 时刻快照（<code>num_computed + num_new</code>），不能使用含其他步占位的 <code>num_tokens</code>——否则位置会错位，这在 chunked prefill + 深度 2 下真实出现过（重复/错位 token，async_engine.py:676-684 注释）。</p>
+
+<h4 id="s4-2-4">4.2.4 结果对账与一致性（_reconcile_async_output）</h4>
+<p>结果到达时（scheduler.py:718-808）：释放本步预留的占位 → <b>此刻才发布</b>前缀缓存块（且按本步快照的物理表发布，而非请求当前滚动表——更新的在飞 chunk 可能已推进过表）→ 追加真实 token、产出流式输出。投机解码的<b>未用余量回退</b>：预留上界减去实际保留 token 数，差额从 <code>num_computed_tokens</code> 扣回，最终账目与同步路径逐 token 一致（scheduler.py:793-808）。</p>
+<p>三类边界都有明确处置：</p>
+<ul>
+  <li><b>请求已结束/被抢占但还有在飞步骤</b>：结果直接丢弃（其块已释放或状态已重置，再应用会损坏账目）。抢占路径同时清零占位与栅栏，请求回到 waiting 干净重排（scheduler.py:639-649, 919-923）。注释里记录了深度 2 下该检查的正确性边界：更深的流水需要改为每请求调度纪元。</li>
+  <li><b>步骤出错 / 超时</b>（async_engine.py:742-788）：失败批及其所有依赖其乐观状态的在飞批全部作废、请求中止；由于 worker 仍会对每条命令回一条结果，作废步骤的 <code>step_id</code> 记入 <code>_discard_result_step_ids</code>，由 <code>_get_live_result</code> 在取结果时<b>排空丢弃</b>，保证陈旧结果永远不会被张冠李戴到后续批次上（async_engine.py:588-604）。</li>
+  <li><b>空闲期的清理</b>：无活可干但有待释放请求时，发一条空批 clean-up <code>StepCommand</code>（只带 <code>finished_request_ids</code>），worker 容忍空批并回空结果，避免中止请求的设备槽被钉住（async_engine.py:701-740）。</li>
+</ul>
+
+<h4 id="s4-2-6">4.2.6 时序对比</h4>
+<figure>
+  <p class="fig-title">图 2 · 三种执行模式下的 host / device 时间线（示意）</p>
+  <p class="fig-sub">蓝 = host 调度与输入准备 · 橙 = 设备内核执行 · 绿 = host 输出回收 · 虚线框 = 进程阻塞等待</p>
+  <div class="legend">
+    <span class="key"><span class="swatch" style="background:var(--stage-host)"></span>host：调度 / 准备</span>
+    <span class="key"><span class="swatch" style="background:var(--stage-device)"></span>device：内核执行</span>
+    <span class="key"><span class="swatch" style="background:var(--stage-reclaim)"></span>host：回收 / 后处理</span>
+    <span class="key"><span class="swatch" style="background:var(--surface-2);border:1px dashed var(--baseline)"></span>空闲</span>
+  </div>
+
+  <div class="gantt">
+    <div class="gantt-group">
+      <div class="g-title">模式 A · 同步调度（async_scheduling=false，或旧行为）</div>
+      <div class="lane"><span class="lane-label">引擎进程</span><div class="track">
+        <span class="blk host"    style="left:1%;width:9%"  title="schedule N + IPC">调度N</span>
+        <span class="blk idle"    style="left:11%;width:57%" title="await 结果（阻塞）">等待结果…</span>
+        <span class="blk reclaim" style="left:69%;width:7%"  title="更新状态 N">更新N</span>
+        <span class="blk host"    style="left:77%;width:9%"  title="schedule N+1 + IPC">调度N+1</span>
+        <span class="blk idle"    style="left:87%;width:12%" title="等待"></span>
+      </div></div>
+      <div class="lane"><span class="lane-label">Worker 进程</span><div class="track">
+        <span class="blk host"    style="left:11%;width:6%"  title="准备输入 N">准备N</span>
+        <span class="blk device"  style="left:18%;width:50%" title="decode_fwd N（设备执行）">device 执行 N</span>
+        <span class="blk reclaim" style="left:69%;width:7%"  title="回收 N + IPC">回收N</span>
+        <span class="blk idle"    style="left:77%;width:22%" title="等待下一条命令">空闲：等引擎调度 N+1</span>
+      </div></div>
+      <div class="gap-note"><span class="brace" style="left:77%;width:22%"></span><span class="tag" style="left:88%">设备空转 = 调度 + IPC + 更新</span></div>
+      <p class="g-note">每步周期 = host 全额开销 + device 时间，设备利用率被主机直接限制。</p>
+    </div>
+
+    <div class="gantt-group">
+      <div class="g-title">模式 B · 引擎级异步调度（depth 2 —— Qwen3-14B 当前默认）</div>
+      <div class="lane"><span class="lane-label">引擎进程</span><div class="track">
+        <span class="blk host"    style="left:1%;width:8%"   title="schedule N + IPC">调度N</span>
+        <span class="blk host"    style="left:13%;width:8%"  title="schedule N+1 + IPC（N 还在执行）">调度N+1</span>
+        <span class="blk ghost"   style="left:22%;width:41%" title="事件循环可跑其他请求/IO，不阻塞在 N">（事件循环 await）</span>
+        <span class="blk reclaim" style="left:63%;width:6%"  title="更新 N">更新N</span>
+        <span class="blk host"    style="left:70%;width:8%"  title="schedule N+2 + IPC">调度N+2</span>
+        <span class="blk reclaim" style="left:86%;width:6%"  title="更新 N+1">更新N+1</span>
+      </div></div>
+      <div class="lane"><span class="lane-label">Worker 进程</span><div class="track">
+        <span class="blk host"    style="left:10%;width:6%"  title="准备输入 N（含占位 token 回填）">准备N</span>
+        <span class="blk device"  style="left:17%;width:45%" title="decode_fwd N">device 执行 N</span>
+        <span class="blk reclaim" style="left:63%;width:6%"  title="回收 N">回收N</span>
+        <span class="blk host"    style="left:70%;width:6%"  title="准备 N+1（命令早已在队列）">准备N+1</span>
+        <span class="blk device"  style="left:77%;width:22%" title="decode_fwd N+1">device N+1</span>
+      </div></div>
+      <p class="g-note">调度 / IPC / 更新全部与设备执行重叠；worker 做完 N 立刻取到已排队的 N+1，设备间空隙收缩到 worker 自身的准备+回收。</p>
+    </div>
+
+    <div class="gantt-group">
+      <div class="g-title">模式 C · worker 三级流水（prepare / dispatch / reclaim 分车道，runner 支持时）</div>
+      <div class="lane"><span class="lane-label">prepare 车道</span><div class="track">
+        <span class="blk host"    style="left:1%;width:7%"   title="提前准备 N+1">prep N+1</span>
+        <span class="blk host"    style="left:19%;width:7%"  title="提前准备 N+2">prep N+2</span>
+        <span class="blk host"    style="left:37%;width:7%"  title="提前准备 N+3">prep N+3</span>
+        <span class="blk host"    style="left:55%;width:7%"  title="…">prep N+4</span>
+        <span class="blk host"    style="left:73%;width:7%"  title="…">prep N+5</span>
+      </div></div>
+      <div class="lane"><span class="lane-label">device 车道</span><div class="track">
+        <span class="blk idle"    style="left:1%;width:8%"   title="冷启动">冷启动</span>
+        <span class="blk device"  style="left:10%;width:22%" title="dispatch + 执行 N">device N</span>
+        <span class="blk device"  style="left:33%;width:22%" title="device N+1">device N+1</span>
+        <span class="blk device"  style="left:56%;width:22%" title="device N+2">device N+2</span>
+        <span class="blk device"  style="left:79%;width:20%" title="device N+3">device N+3</span>
+      </div></div>
+      <div class="lane"><span class="lane-label">reclaim 车道</span><div class="track">
+        <span class="blk reclaim" style="left:33%;width:7%"  title="回收 N（与 device N+1 并行）">reclaim N</span>
+        <span class="blk reclaim" style="left:56%;width:7%"  title="reclaim N+1">reclaim N+1</span>
+        <span class="blk reclaim" style="left:79%;width:7%"  title="reclaim N+2">reclaim N+2</span>
+      </div></div>
+      <p class="g-note">稳态下 prepare(N+1) 与 reclaim(N−1) 完全藏进 device N 的执行窗，每步关键路径只剩设备时间。</p>
+    </div>
+    <div class="axis"><span>t₀</span><span>t₁</span><span>t₂</span><span>t₃</span><span>t₄</span><span>t₅</span><span>t₆</span><span>t₇</span><span>t₈</span></div>
+  </div>
+  <figcaption>示意图：块宽不代表实测比例。模式 B 是 Qwen3-14B 今天的实际形态（引擎异步调度 + worker FIFO 串行循环）；模式 C 需要 runner 实现 split decode 接口（§4.3.7），当前由 DeepSeek V4 fused-MTP runner 验证。</figcaption>
+</figure>
+
+<!-- ---------------- 4.3 ---------------- -->
+<h3 id="s4-3">4.3 Worker 三级流水线：异步 prepare / dispatch / reclaim</h3>
+
+<h4>4.3.1 设计问题</h4>
+<p>引擎级流水（模式 B）解决了"引擎侧"的主机开销，但 worker 进程内部仍是串行的：<i>准备输入 → 派发并等待内核 → 回收输出</i>。其中"准备输入"（写内核元数据、构造张量描述）与"回收输出"（等待完成、读采样结果、编码 StepResult）都是 host 工作，且都不需要占用设备。把它们拆成独立车道，就能与设备执行重叠——这是模式 C。</p>
+
+<h4 id="s4-3-2">4.3.2 三车道结构</h4>
+<p>worker 的 <code>_pipelined_busy_loop</code>（serving_worker.py:252-338）把执行拆成三条 FIFO 车道、两个内部队列：</p>
+
+<figure>
+  <p class="fig-title">图 3 · WorkerProcess 三车道流水线（decode 稳态路径）</p>
+  <p class="fig-sub">serving_worker.py:252-445；prefill 与重生命周期命令保留串行回退</p>
+  <div class="lanes3">
+    <div class="lanebox">
+      <span class="lname">① 命令 / prepare 车道<small>主线程 · input_queue → work_queue</small></span>
+      <span class="ldesc">取 <code>StepCommand</code> → 快照待释放的请求缓存条目 → <b>提前执行 <code>executor.prepare_decode()</code></b>：在设备忙于上一步时就把 decode 元数据快照构建好（token 仍是占位）。纯 decode 命令还按 <code>step_id % 2</code> 认领一个缓冲槽。</span>
+    </div>
+    <div class="q">↓ <span class="qname">work_queue</span>（maxsize = 2，天然背压）</div>
+    <div class="lanebox">
+      <span class="lname">② device 车道<small>线程 pypto-device</small></span>
+      <span class="ldesc">FIFO 消费准备好的工作：<b>late-bind</b> 补上真实 token → <code>executor.dispatch_prepared_decode()</code> <b>异步提交</b>设备工作（<code>worker.submit</code>，立即返回 pending 句柄，不等完成）→ 马上处理下一条。生命周期（请求释放/注册）也在这条车道按序应用。</span>
+    </div>
+    <div class="q">↓ <span class="qname">output_work_queue</span></div>
+    <div class="lanebox">
+      <span class="lname">③ output / reclaim 车道<small>线程 pypto-output</small></span>
+      <span class="ldesc">按派发顺序对 pending 句柄 <code>reclaim_prepared_decode()</code>：等完成、释放每步临时上传、物化 token、消费采样结果、编码 <code>StepResult</code> 投回引擎，并归还缓冲槽。发布顺序 = 派发顺序 = 引擎期望顺序。</span>
+    </div>
+  </div>
+  <div style="display:flex;justify-content:center;margin-top:14px"><span style="font-size:12.5px;color:var(--text-secondary)">双缓冲槽（§4.3.5）：</span></div>
+  <div class="slot-pair">
+    <span class="slt busy">slot = step_id % 2 == 0（占用中）</span>
+    <span class="slt">slot = step_id % 2 == 1</span>
+  </div>
+  <figcaption>三车道各自的失败都以 <code>StepResult(error=…)</code> 的形式汇入输出车道，worker 循环永不因单步异常退出。</figcaption>
+</figure>
+
+<h4>4.3.3 prepare：设备忙时就把元数据备好</h4>
+<p><code>_prepare_step_command</code>（serving_worker.py:755-796）只处理"纯 decode、无新请求"的命令，且要求执行器支持设备端 decode embedding（否则占位 token 无法正确嵌入，保留串行路径）。它调用 runner 的 <code>prepare_decode(runtime_model, batch, buffer_slot=…)</code>，把 batch 的请求集合、seq_len、块表等一切<b>不依赖上一步输出</b>的信息固化成快照；token 字段留占位。能力协议由 <code>ModelExecutor</code> 基类定义（executor.py:66-122），<code>PyptoExecutor</code> 转发到 runner 并声明 <code>supports_async_decode_prepare</code>（pypto_executor.py:128-172）——<b>worker 主线程可以在 device 线程执行的同时调用 prepare</b>，实现必须在没有锁保护的情况下保持对正在执行的 decode 不可见。</p>
+
+<h4>4.3.4 dispatch：late-bind 与异步提交</h4>
+<p>device 车道拿到快照后（serving_worker.py:373-406）：若执行器声明"dispatch 仍需要上一步 token"（<code>prepared_decode_requires_token</code>，默认 True），先 <b>late-bind</b>——从 <code>_last_tokens</code> 解析占位 token、重建 <code>token_ids</code> 张量、替换进快照的 batch（<code>_late_bind_prepared_decode_batch</code>，serving_worker.py:483-502）；然后 <code>dispatch_prepared_decode</code> 走 <code>_submit_l3</code>：<b>解析参数 → worker.submit() → 立刻返回 <code>PendingL3Dispatch</code></b>（l3_dispatch.py:135-175）。每步临时上传的张量所有权移交 pending 句柄，等 <code>wait()</code> 回收输出时统一释放（l3_dispatch.py:52-78）。DeepSeek fused-MTP 的实现则连 token 都不需要 late-bind——其持久设备状态在 prefill 期已定，冷/热描述符一律原样提交（npu_runner.py(deepseek):1132-1138）。</p>
+
+<h4 id="s4-3-5">4.3.5 双缓冲槽乒乓</h4>
+<p>流水线中相邻两步的输出缓冲会同时存活（一步在写、一步在读），因此每类 decode I/O 需要<b>两份</b>。机制（serving_worker.py:52, 260-333, 443-444）：</p>
+<ul>
+  <li>槽号 = <code>step_id % _DECODE_PIPELINE_SLOTS</code>（=2），随命令传入 <code>prepare_decode(buffer_slot=…)</code>，由 runner 选用对应的缓冲组；</li>
+  <li>每槽一把 <code>Semaphore(1)</code>：主线程在 prepare 前 acquire，reclaim 车道发布结果后 release——<b>同一槽的复用被硬性互斥</b>，prepare 永不会覆盖尚未回收的输出；</li>
+  <li>串行回退路径（无槽命令）不持有信号量，<code>buffer_slot</code> 仅用于错误回执。</li>
+</ul>
+
+<h4>4.3.6 顺序与生命周期保证</h4>
+<ul>
+  <li><b>释放先于注册的快照</b>：主线程在发布新注册前，先快照 <code>finished_request_ids</code> 对应的缓存条目；device 车道应用释放时逐条比对"当前条目还是快照那个对象"才删——防止释放一个已被同 ID 新请求复用的条目（serving_worker.py:298-309, 547-579）。</li>
+  <li><b>生命周期留在 FIFO device 车道</b>：请求释放/注册与设备工作同序应用，顺序语义与串行循环完全一致。</li>
+  <li><b>profiling 屏障</b>：<code>ProfileCommand</code> 作为屏障插入输出队列，device 车道等它执行完才继续——保证 profiler 的启停与输出回收有序（serving_worker.py:91-94, 356-360, 429-434）。</li>
+  <li><b>什么走串行回退</b>：prefill 命令、带新注册的命令、prepare 失败、执行器不支持 split——统一落到原来的同步路径，正确性优先（<code>_can_split_decode_output</code>，serving_worker.py:447-462）。</li>
+</ul>
+
+<h4 id="s4-3-7">4.3.7 接入条件与当前状态（重要）</h4>
+<div class="callout">
+  <p><b>能力开关在 runner 手里。</b>worker 进入三车道循环的条件是 <code>executor.supports_async_decode_prepare</code>（busy_loop 分岔，serving_worker.py:216-225），而它要求<b>每个</b>注册的 runner 都实现 <code>prepare_decode</code> / <code>run_prepared_decode</code>（pypto_executor.py:128-135）；独立 dispatch/reclaim 回收再要求 <code>supports_async_decode_reclaim</code> + <code>dispatch_prepared_decode</code> / <code>reclaim_prepared_decode</code>（pypto_executor.py:174-182）。</p>
+  <p><b>当前主干状态</b>：该框架由 <b>DeepSeek V4 fused-MTP runner</b> 完整接入并验证（deepseek/npu_runner.py:1651-1773；提交 <span class="ref">1aed42d / b1c19a3</span>）；<b>Qwen3-14B runner 尚未实现 runner 级 split 接口</b>，因此 Qwen 的 worker 运行 FIFO 串行循环——但依然完整受益于 §4.2 的引擎级 depth-2 异步调度与占位 token 机制（串行循环同样执行 <code>_resolve_decode_token</code> 回填），即图 2 的模式 B。</p>
+  <p><b>Qwen 接入路径</b>（框架已备好，无需改 worker）：在 <code>Qwen314BModelRunner</code> 上实现四个方法——<code>prepare_decode</code>（复用 <code>_prepare_decode_inputs</code> 的元数据写入，token 留占位、按 <code>buffer_slot</code> 选择缓冲组）、<code>dispatch_prepared_decode</code>（走 <code>_submit_l3</code> 异步提交）、<code>reclaim_prepared_decode</code>（等 pending、读 <code>sampled_ids</code>/topk 槽）、<code>run_prepared_decode</code>（dispatch+reclaim 串行组合，供回退路径）；并把 decode 的输出槽（<code>sampled_ids</code>、topk 值/索引）双份化以配合槽乒乓。Qwen 属于"dispatch 需要 token"的类型，late-bind 通道（§4.3.4）就是为它准备的。</p>
+</div>
+
+<!-- ---------------- 4.4-4.7 ---------------- -->
+<h3 id="s4-4">4.4 轻量化 IPC 协议</h3>
+<p>引擎与 worker 之间的命令是 <b>msgpack 编码的增量协议</b>（ipc.py:10-23）：prompt 与采样参数经 <code>NewRequestData</code> <b>每请求只发一次</b>，worker 端 <code>_req_cache</code> 记住；此后每步只传增量（每请求一个 <code>DecodeRequest</code>，batch 16 时整条命令约 1 KB），对比旧的全图 pickle 每步约 160 KB，序列化与跨进程拷贝开销降两个数量级。结构一览：</p>
+<table>
+  <tr><th>消息</th><th>方向</th><th>关键字段</th></tr>
+  <tr><td><code>StepCommand</code></td><td>engine → worker</td><td><code>new_requests</code>（首见请求）/ <code>prefill_requests</code>（chunk_tokens、num_computed_tokens、block_ids）/ <code>decode_requests</code>（last_token 可为 <b>-1 占位</b>、schedule 时刻快照的 seq_len、block_ids）/ <code>finished_request_ids</code> / 单调 <code>step_id</code></td></tr>
+  <tr><td><code>StepResult</code></td><td>worker → engine</td><td><code>new_tokens: {request_id: [token…]}</code>（MTP 为多 token）、<code>error</code>、回显 <code>step_id</code></td></tr>
+  <tr><td><code>ShutdownCommand</code> / <code>ProfileCommand</code></td><td>engine → worker</td><td>退出循环 / 启停进程内 SA profiler（确认走独立队列，不与推理结果混淆）</td></tr>
+</table>
+
+<h3 id="s4-5">4.5 常驻共享内存缓冲（TaskArgs）</h3>
+<p>runner 为每类派发（prefill / decode / topk）维护一个 <code>TaskArgs</code>：以<b>内核位置参数顺序</b>注册所有参数——I/O 槽（host 共享内存张量）、静态权重（<code>StaticDeviceTensor</code> 标记，上传一次后缓存）、KV 池句柄（lazy source，build 时解析）（qwen/task_args.py:107-205）。热路径收益：</p>
+<ul>
+  <li><b>零每步分配</b>：所有定形缓冲（seq_lens、block_table、slot_mapping、logits、token_ids、sampled_ids、topk 输出……）构造期一次 <code>torch.empty(...).share_memory_()</code>，此后原地复写；元数据用 numpy 视图直写（npu_runner.py:183-191）；</li>
+  <li><b>静态权重一次上传</b>：<code>resolve_l3_arg</code> 以 <code>(data_ptr, shape, dtype)</code> 为缓存键，命中直接复用设备指针，全 40 层权重与 rope 表在服务期内只进设备一次（buffer_set.py:88-136）；</li>
+  <li><b>每次派发的元组也可缓存</b>：槽在原地写、句柄稳定，<code>build(use_cache=True)</code> 免去重复构造（task_args.py:191-210）；</li>
+  <li><b>顺序即契约</b>：注册顺序就是内核签名顺序，文件本身即位置契约的单一事实来源，杜绝"改了内核签名忘改调用方"。</li>
+</ul>
+<p>此外 prefill 的 <code>input_ids</code> / <code>slot_mapping</code> 以<b>按调用长度的切片</b>拼接进已构建元组（npu_runner.py:770-781），decode 在设备采样时把 <code>logits</code> / <code>next_hidden</code> 换成设备驻留 scratch（npu_runner.py:783-796）——都是"常驻缓冲 + 少量拼接"的同一思想的延伸。</p>
+
+<h3 id="s4-6">4.6 设备端 embedding 与采样</h3>
+<p>Qwen 执行器声明 <code>supports_device_embedding</code>（prefill 与 decode 都在内核内查表，engine 无需先算 hidden states，npu_executor.py:165-168）与设备采样能力（§3.8）。组合效果：<b>稳态 greedy decode 每步跨 host/device 边界的只有——输入侧一个 int token id，输出侧一个 int 采样 token</b>；全词表 logits（16 × 152064 × 4 B ≈ 9.7 MB/步 @batch16）全程留在设备。Top-K 采样把边界流量限制在 32 个候选对。这是 host 侧优化里"把工作移回设备"而非"重叠工作"的一条线。</p>
+
+<h3 id="s4-7">4.7 其他 host 侧优化</h3>
+<ul>
+  <li><b>增量 detokenize</b>：只 decode 新完成的文本窗口（保留 3 token 前缀窗口防多字节字符跨界损坏），每步 O(1) 摊销，替代每步全量 re-decode 的 O(N²)；结束时一次性全量 decode 兜底未完成的多字节尾字符（async_engine.py:846-896）。</li>
+  <li><b>非流式 final-only 输出</b>：非流式请求中间 token 不入队，每请求一次 queue push / 一次协程唤醒，替代每 token 一次（async_engine.py:120-126, 826-829）；stop string 检测仍每步执行，只是发布被推迟。</li>
+  <li><b><code>gc.freeze()</code> 冻结常驻集</b>：引擎与 worker 各自在常驻集就绪后 <code>collect(0/1/2) + freeze()</code>，把权重、编译内核、KV 块对象提升为永久代，gen2 不再重扫——避免毫秒级 GC 停顿插入解码步中期（gc_utils.py:34-45；async_engine.py:293、serving_worker.py:986-991，两进程各自执行，freeze 不跨 spawn）。</li>
+  <li><b>调度器本身的开销控制</b>：连续批处理 + chunked prefill（长 prompt 切 ≤2048 token 的 chunk，与 decode 混步）+ vLLM 式抢占（块不足时按到达时间抢最低优先级受害者，回炉重算）+ 链式哈希前缀缓存（块哈希含父块哈希，命中即整前缀匹配；命中保留最后 1 token 不缓存，保证首 token 走与冷启动相同的内核路径，kv_cache.py:27-29, 393-415）。</li>
+  <li><b>启动路径</b>：权重 staging 线程池 + 磁盘内核缓存（§3.3/3.4）把重启成本压到"读 slab + 重载编译产物"。</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="s5">5 · 可靠性与生命周期</h2>
+<table>
+  <tr><th>场景</th><th>行为</th><th>代码</th></tr>
+  <tr><td>worker 初始化超时</td><td>默认 1800 s（大 checkpoint 需要更久时调 <code>PYPTO_WORKER_INIT_TIMEOUT</code>），超时即关闭 worker 并报错</td><td><span class="ref">async_engine.py:253-263 · env.py:32-33</span></td></tr>
+  <tr><td>步骤超时 / worker 报错</td><td>失败批 + 依赖其乐观状态的在飞批全部作废；相关请求收到 <code>finish_reason="error"</code>；在途陈旧结果按 step_id 排空（§4.2.4）</td><td><span class="ref">async_engine.py:742-788</span></td></tr>
+  <tr><td>请求中止 / 客户端断连</td><td>调度器 abort + 块释放；释放 id 搭下一条 StepCommand 去 worker（无活可干时发空批清理命令），_req_cache/_last_tokens 同步清理，设备槽不泄漏</td><td><span class="ref">async_engine.py:429-458, 701-740</span></td></tr>
+  <tr><td>步骤级超时阈值</td><td><code>SERVING_WORKER_STEP_TIMEOUT</code> 默认 1200 s（首个大批次派发可能分钟级，勿设过小）</td><td><span class="ref">env.py:36-37</span></td></tr>
+  <tr><td>优雅退出</td><td><code>ShutdownCommand</code> → worker 退出循环并 close executor；引擎侧 join 超时后 terminate 兜底</td><td><span class="ref">serving_worker.py:242-250 · async_engine.py:898-918</span></td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="s6">6 · 使用指南</h2>
+
+<h4>6.1 离线生成（与 serving 同引擎）</h4>
+<pre><code>pypto-serving \
+  --model /path/to/Qwen3-14B \
+  --platform a2a3 --device 0 \
+  --max-model-len 512 \
+  --prompt 'Huawei is' \
+  --generate-config '{"max_new_tokens": 5}'</code></pre>
+<p>重复 <code>--prompt</code> 即离线连续批处理；加 <code>--profile</code> 捕获生成窗口的 Chrome trace。</p>
+
+<h4>6.2 HTTP serving（OpenAI 兼容）</h4>
+<pre><code>pypto-serving \
+  --model /path/to/Qwen3-14B \
+  --backend npu --platform a2a3 --device 0 \
+  --max-model-len 512 --port 8899
+
+curl --noproxy "*" http://127.0.0.1:8899/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen3-14B", "prompt": "Huawei is", "max_tokens": 32,
+       "temperature": 0, "stream": true}'</code></pre>
+<p>chat 接口支持 Qwen3 的 <code>chat_template_kwargs</code>（如 <code>{"enable_thinking": false}</code>）；流式为 SSE，末块带权威 usage 统计。</p>
+
+<h4>6.3 DP=2</h4>
+<pre><code>pypto-serving --model /data/models/Qwen3-14B --backend npu --platform a2a3 \
+  --devices 0,1 --dp 2 --tp 1 --max-model-len 512 --port 8899</code></pre>
+<p>每副本一条完整的 core+worker 链路，请求按 least-pending-tokens 路由。</p>
+
+<h4>6.4 Qwen 相关常用参数</h4>
+<table>
+  <tr><th>参数</th><th>默认</th><th>说明</th></tr>
+  <tr><td><code>--block-size</code></td><td>128</td><td>Qwen 内核固定要求 128</td></tr>
+  <tr><td><code>--max-num-seqs</code></td><td>16</td><td>并发请汽数上限 = decode 内核批宽</td></tr>
+  <tr><td><code>--max-num-batched-tokens</code></td><td>4096</td><td>每调度步 token 预算（chunked prefill 粒度）</td></tr>
+  <tr><td><code>--max-model-len</code></td><td>1024</td><td>不得超过内核 MAX_SEQ（默认 4096）</td></tr>
+  <tr><td><code>--npu-memory-utilization</code></td><td>0.90</td><td>KV 测算公式中的利用率项</td></tr>
+  <tr><td><code>--long-prefill-token-threshold</code></td><td>2048</td><td>长 prompt 的 chunk 上限</td></tr>
+  <tr><td><code>--dtype / --kv-cache-dtype</code></td><td>bfloat16</td><td>权重 / KV dtype</td></tr>
+  <tr><td><code>--use-compile-cache</code></td><td>off</td><td>内核落盘缓存，重启跳过 JIT + 设备编译</td></tr>
+  <tr><td><code>--enable-prefix-caching / --enable-chunked-prefill</code></td><td>on / on</td><td>前缀缓存 / 分块 prefill</td></tr>
+</table>
+<p>注：异步调度目前无 CLI 开关，<code>EngineConfig</code> 层默认开启（async_engine.py:93-99）。</p>
+
+<!-- ================================================================ -->
+<h2 id="s7">7 · 配置与环境变量参考</h2>
+<table>
+  <tr><th>环境变量</th><th>默认</th><th>作用</th></tr>
+  <tr><td><code>PYPTO_LIB_ROOT</code></td><td>—</td><td>pypto-lib 检出路径（定位 <code>models/qwen3_14b</code> 内核；未设则向上搜索仓库内 submodule）</td></tr>
+  <tr><td><code>PYPTO_PROG_BUILD_DIR</code></td><td><code>build_output</code></td><td>编译/缓存基目录；每个 worker 追加 <code>serving_dp&lt;rank&gt;_d&lt;devices&gt;</code> 子目录隔离</td></tr>
+  <tr><td><code>PYPTO_STAGING_THREADS</code></td><td><code>min(40, cpu, 32)</code></td><td>权重 staging 线程数（内存带宽瓶颈，16-32 后收益饱和）</td></tr>
+  <tr><td><code>PYPTO_WORKER_INIT_TIMEOUT</code></td><td>1800 s</td><td>worker 初始化（加载+编译+KV 测算）超时</td></tr>
+  <tr><td><code>SERVING_WORKER_STEP_TIMEOUT</code></td><td>1200 s</td><td>单步执行超时（引擎侧在飞结果等待上限）</td></tr>
+  <tr><td><code>SA_PROFILE_OUTPUT / SA_PROFILE_LEVEL</code></td><td><code>./profile_out</code> / <code>e2e,kernel</code></td><td>配合 <code>--profile</code>：trace 输出位置与级别（e2e/kernel/verbose）</td></tr>
+  <tr><td><code>PYPTO_SERVING_GC_DEBUG</code></td><td>off</td><td>附加 GC 回调日志（每次收集的代数/耗时）</td></tr>
+  <tr><td><code>PTO2_RING_HEAP</code></td><td>256 MiB</td><td>simpler ring-heap arena（内存构成日志按 ×4 估算）</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="s8">8 · 代码地图</h2>
+<table>
+  <tr><th>关注点</th><th>文件</th></tr>
+  <tr><td>引擎循环 / 异步调度 / DP 路由 / 增量 detok</td><td><span class="ref">pypto_serving/serving/engine/async_engine.py</span></td></tr>
+  <tr><td>连续批处理 / 乐观推进 / 对账 / 抢占</td><td><span class="ref">pypto_serving/serving/sched/scheduler.py</span></td></tr>
+  <tr><td>worker 进程 / 三车道流水线 / 占位 token 回填</td><td><span class="ref">pypto_serving/serving/server/serving_worker.py</span></td></tr>
+  <tr><td>IPC 协议（msgpack 增量命令）</td><td><span class="ref">pypto_serving/serving/server/ipc.py</span></td></tr>
+  <tr><td>HTTP API（OpenAI 兼容 + SSE）</td><td><span class="ref">pypto_serving/serving/server/server.py</span></td></tr>
+  <tr><td>KV 块管理 / 链式哈希前缀缓存</td><td><span class="ref">pypto_serving/serving/memory/kv_cache.py</span></td></tr>
+  <tr><td>Qwen 执行器（编译校验 / 权重 staging）</td><td><span class="ref">pypto_serving/model/qwen/npu_executor.py</span></td></tr>
+  <tr><td>Qwen runner（KV 测算 / prefill / decode / 采样）</td><td><span class="ref">pypto_serving/model/qwen/npu_runner.py</span></td></tr>
+  <tr><td>Qwen 内核位置参数契约（TaskArgs 构建）</td><td><span class="ref">pypto_serving/model/qwen/task_args.py</span></td></tr>
+  <tr><td>Qwen 权重规则表（转换 / 堆叠 / pad 策略）</td><td><span class="ref">pypto_serving/model/qwen/weight_spec.py</span></td></tr>
+  <tr><td>执行器能力接口（split decode 协议）</td><td><span class="ref">pypto_serving/model/common/executor/executor.py · pypto_executor.py</span></td></tr>
+  <tr><td>L3 派发（同步 run / 异步 submit + Pending 句柄）</td><td><span class="ref">pypto_serving/model/common/runner/l3_dispatch.py</span></td></tr>
+  <tr><td>共享内存缓冲 / 静态上传解析</td><td><span class="ref">pypto_serving/model/common/runner/buffer_set.py · task_args.py</span></td></tr>
+  <tr><td>权重 staging 流水线（store/spec/packer/stacker/pipeline）</td><td><span class="ref">pypto_serving/model/common/weights/</span></td></tr>
+  <tr><td>内核编译与磁盘缓存</td><td><span class="ref">pypto_serving/model/common/compiler/compiler.py · l3_callable.py</span></td></tr>
+  <tr><td>DeepSeek 参考实现（split decode 已接入）</td><td><span class="ref">pypto_serving/model/deepseek/npu_runner.py:1651-1773</span></td></tr>
+</table>
+
+<footer class="doc-foot">
+  基于 pypto-serving 主干 <code>9db7e20</code>（2026-09）整理；配套设计文档见仓库 <code>docs/dev/model/qwen.md</code>、<code>docs/dev/model/weight-staging.md</code>、<code>docs/dev/parallel.md</code>、<code>docs/dev/profile.md</code>。文中行号随代码演进可能漂移，以符号名检索为准。
+</footer>
+
+</main>
+</div>
+</body>
+</html>
